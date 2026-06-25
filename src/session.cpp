@@ -13,8 +13,12 @@ namespace session {
 }
 #else
 #include <Arduino.h>
-RTC_DATA_ATTR static SessionState g_state;
-RTC_DATA_ATTR static bool         g_state_valid = false;
+
+// Updated memory attributes for the ESP32-S3 chip.
+// RTC_NOINIT_ATTR blocks the S3 bootloader from cleanly zeroing out this 
+// memory zone on soft reboots, preserving your session states safely.
+RTC_NOINIT_ATTR static SessionState g_state;
+RTC_NOINIT_ATTR static bool         g_state_valid;
 
 namespace session {
     void begin() {
@@ -24,6 +28,8 @@ namespace session {
             || g_state.magic   != SESSION_MAGIC
             || g_state.version != SESSION_VERSION) {
             g_state = SessionState{};
+            g_state.magic = SESSION_MAGIC;
+            g_state.version = SESSION_VERSION;
             g_state_valid = true;
         }
     }
@@ -31,10 +37,14 @@ namespace session {
     bool has_session()    { return g_state.active; }
     void mark_active(const SessionState& s) {
         g_state = s;
+        g_state.magic = SESSION_MAGIC;       // Enforce structural boundaries
+        g_state.version = SESSION_VERSION;
         g_state.active = true;
     }
     void clear() {
         g_state = SessionState{};
+        g_state.magic = SESSION_MAGIC;
+        g_state.version = SESSION_VERSION;
         g_state.active = false;
     }
 }

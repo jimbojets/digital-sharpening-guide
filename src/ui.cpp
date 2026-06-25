@@ -6,7 +6,7 @@
 #include <cstdio>
 #include <cmath>
 
-// Landscape layout: M5StickC Plus panel is 135x240 native; setRotation(1) gives
+// Landscape layout: M5StickS3 panel is 135x240 native; setRotation(1) gives
 // a 240(W) x 135(H) canvas, which is how the device is held in use.
 namespace {
     constexpr int SCR_W = 240;
@@ -67,6 +67,11 @@ namespace ui {
 void begin() {
     M5.Display.setRotation(1);   // landscape, 240x135
     M5.Display.setTextWrap(false);
+    
+    // Explicitly enforce standard, fixed-width classic GLCD Font0.
+    // This locks text_w calculation offsets to perfectly match the S3 panel.
+    M5.Display.setFont(&fonts::Font0);
+    
     clear();
 }
 
@@ -210,7 +215,7 @@ void draw_summary(float target_deg, Tolerance tol, uint32_t a, uint32_t b, uint3
 void draw_fault(FaultCode code) {
     clear();
     draw_centered("IMU FAULT", 24, 3, COL_RED, COL_BLACK);
-    char buf[8];
+    char buf[12];
     std::snprintf(buf, sizeof buf, "E%02u", (unsigned)code);
     draw_centered(buf, 62, 3, COL_RED, COL_BLACK);
     draw_centered("Power-cycle to retry", 112, 1, COL_WHITE, COL_BLACK);
@@ -266,8 +271,8 @@ void draw_zero_cal_progress(int remaining_ms, bool moving) {
 }
 
 void set_backlight(uint8_t percent) {
-    // Brightness is an AXP192 I2C register write on this board (bus shared with
-    // the MPU6886), so same-value writes must be skipped, not repeated every tick.
+    // Backlight on the S3 uses standard PWM hardware timing instead of an I2C chip registry.
+    // The same-value comparison is safely preserved to conserve clock cycles at 50 Hz.
     static uint8_t s_last_pct = 255;   // impossible sentinel (range is 0..100)
     if (percent > 100) percent = 100;
     if (percent == s_last_pct) return;
@@ -276,6 +281,7 @@ void set_backlight(uint8_t percent) {
 }
 
 } // namespace ui
+
 
 #else
 // Native stubs for tests.

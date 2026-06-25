@@ -17,9 +17,10 @@ static InputFSM  g_input;
 
 static uint32_t  g_next_tick_ms       = 0;
 static constexpr uint32_t TICK_PERIOD_MS = kLoopTickMs; // 50 Hz — ample for human motion (1-5 Hz)
-// A single imu::read() returning false just means "no fresh IMU sample this tick"
-// (MPU6886 data-ready clear at 50 Hz) — not a fault. Only a sustained run of
-// failures (0.5 s) indicates a genuinely unresponsive IMU.
+
+// A single imu::read() returning false simply means the BMI270 data interrupt 
+// packet hasn't hit the internal registries yet. Only a sustained run of 
+// failures (0.5 s) indicates a genuinely unresponsive IMU bus.
 static constexpr uint32_t IMU_FAULT_TICKS = 25;
 
 void setup() {
@@ -27,12 +28,12 @@ void setup() {
     cfg.internal_imu = true;
     cfg.internal_spk = true;
     M5.begin(cfg);
-    setCpuFrequencyMhz(80);  // 80 MHz is ample for 50 Hz loop; saves ~25 mA
+    
+    // Core S3 Frequency: Kept at 240 MHz to preserve stable I2S timing requirements 
+    // for the ES8311 audio speaker driver codec.
+    setCpuFrequencyMhz(240);  
 
-    // Consume any pending AXP192 power-key press (reads + clears the IRQ flag).
-    // The press that woke us from deep sleep would otherwise surface as a
-    // BtnPWR click on the first M5.update() and immediately put us back to sleep.
-    M5.Power.getKeyState();
+    // Removed legacy AXP192 getKeyState() which causes core panics on S3 hardware.
 
     ui::begin();
     feedback::begin();
@@ -40,16 +41,16 @@ void setup() {
     settings::begin();
     session::begin();
 
-    // Detect wake-with-session: only route to RESUME_PROMPT if we actually
-    // deep-slept AND the session-state in RTC RAM is marked active.
-    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    bool had_session_in_rtc = (cause != ESP_SLEEP_WAKEUP_UNDEFINED) && session::has_session();
+    // Standardized M5Unified wake detection: checks if the S3 booted from a 
+    // deep-sleep wake cycle triggered by the native Power Button or timers.
+	esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+	bool had_session_in_rtc = (cause != ESP_SLEEP_WAKEUP_UNDEFINED) && session::has_session();
 
     FaultCode fc = imu::begin();
 
     g_app.begin(had_session_in_rtc);
 
-    // Push initial fault if IMU failed.
+    // Push initial fault if IMU initialization failed.
     if (fc != FaultCode::NONE) {
         App::Tick t{millis(), InputEvent::NONE, {0,0,-1}, {0,0,0}, fc};
         g_app.on_tick(t);
@@ -64,30 +65,30 @@ void loop() {
         delay(1);
         return;
     }
-    // Catch-up clamp: if the scheduler fell more than 5 periods behind (e.g. a
-    // long blocking call), resync instead of replaying ticks back-to-back —
-    // burst catch-up ticks would over-integrate the Mahony filter, which
-    // assumes a fixed 20 ms dt per update.
+    
+    // Catch-up clamp: if the scheduler fell more than 5 periods behind, 
+    // resync instead of replaying ticks back-to-back to prevent over-integrating 
+    // the Mahony filter vector.
     if ((int32_t)(now - g_next_tick_ms) > (int32_t)(5 * TICK_PERIOD_MS)) {
         g_next_tick_ms = now;
     }
     g_next_tick_ms += TICK_PERIOD_MS;
 
     M5.update();
-    // Power-key short press = "off" (deep sleep). The matching "on" is the EXT0
-    // wake on GPIO35 armed in power::enter_deep_sleep(). An in-progress session
-    // is in RTC RAM, so waking lands on the RESUME? prompt. The AXP192's 6 s
-    // hard power-off remains available as the hardware escape hatch.
+    
+    // Power-key short press = "off" (triggers safe deep sleep closure).
+    // M5Unified automatically binds BtnPWR to GPIO 41 on the M5StickS3.
     if (M5.BtnPWR.wasClicked()) {
         power::enter_deep_sleep();
     }
+    
+    // Native S3 physical button mapping arrays
     bool a_pressed = M5.BtnA.isPressed();
     bool b_pressed = M5.BtnB.isPressed();
     InputEvent ev = g_input.update(now, a_pressed, b_pressed);
 
-    // imu::read() always populates accel/gyro with the most recent (at most one
-    // tick stale) sample; its false return means "no fresh data this tick", which
-    // is benign and frequent. Only fault after IMU_FAULT_TICKS consecutive misses.
+    // Read the BMI270 sensor. Transient misses are normal; trigger E02 if 
+    // consecutive failures surpass the half-second threshold.
     static uint32_t imu_read_fails = 0;
     Vec3 accel = {0,0,-1}, gyro = {0,0,0};
     FaultCode fault = FaultCode::NONE;
@@ -100,7 +101,7 @@ void loop() {
     App::Tick tick{now, ev, accel, gyro, fault};
     g_app.on_tick(tick);
 
-    // Sleep check uses App's real last-activity / last-stroke timestamps.
+    // Sleep check using App's real last-activity / last-stroke timestamps.
     if (power::check_idle(now, g_app.current(),
                           g_app.last_activity_ms(),
                           g_app.last_stroke_ms())) {
@@ -110,7 +111,7 @@ void loop() {
                             g_app.last_activity_ms(),
                             g_app.last_stroke_ms());
 
-    // If state entered SLEEP explicitly (e.g., B in SUMMARY), trigger sleep now.
+    // If state entered SLEEP explicitly, execute sleep operations.
     if (g_app.current() == State::SLEEP) {
         power::enter_deep_sleep();
     }

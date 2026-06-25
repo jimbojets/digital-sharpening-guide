@@ -32,8 +32,24 @@ void setup() {
     cfg.internal_imu = true;
     cfg.internal_spk = true;          // mirror production
     M5.begin(cfg);
-    setCpuFrequencyMhz(80);           // mirror production
+    setCpuFrequencyMhz(240);           // mirror production
     delay(200);
+
+    // ?? ADD SCREEN DIAGNOSTIC TEST HERE
+    M5.Display.setRotation(1);          // Set landscape layout (240x135)
+    M5.Display.setBrightness(128);      // Turn on backlight to 50%
+    M5.Display.fillScreen(0x07E0);      // Flash the screen solid GREEN
+    delay(400);
+    M5.Display.fillScreen(0x001F);      // Flash the screen solid BLUE
+    delay(400);
+    M5.Display.fillScreen(0x0000);      // Return screen to clear black background
+    
+    // Draw text to prove the font matrix works
+    M5.Display.setFont(&fonts::Font0);
+    M5.Display.setTextColor(0xFFFF);
+    M5.Display.setTextSize(2);
+    M5.Display.setCursor(10, 50);
+    M5.Display.print("DIAG MODE ACTIVE");
 
     Serial.println();
     Serial.println("===== IMU DIAG =====");
@@ -43,6 +59,7 @@ void setup() {
     Serial.printf("imu.getType()            : %d (%s)\n", (int)M5.Imu.getType(), imu_type_name(M5.Imu.getType()));
     Serial.println("--- 50 Hz production-mirror read() failure counters ---");
 }
+
 
 void loop() {
     // Run a full second of 50 Hz ticks like the real loop, counting read() failures.
