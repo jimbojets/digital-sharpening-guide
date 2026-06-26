@@ -46,18 +46,25 @@ void update_backlight(uint32_t now_ms, State current,
     uint8_t baseline_pct = (current == State::ACTIVE) ? 80 : 100;
     uint8_t dim_pct = (current == State::ACTIVE) ? 30 : 15;
 
-    if (cfg.dim_ms == 0) {
-        ui::set_backlight(baseline_pct);
-        return;
-    }
-    uint32_t reference = (current == State::ACTIVE)
-        ? (last_stroke_ms > last_activity_ms ? last_stroke_ms : last_activity_ms)
-        : last_activity_ms;
-    uint32_t idle = now_ms - reference;
-    uint8_t pct = (idle >= cfg.dim_ms) ? dim_pct : baseline_pct;
-    ui::set_backlight(pct);
-}
+    // Track the last written brightness percentage
+    static uint8_t last_applied_pct = 255; 
 
+    uint8_t pct = baseline_pct;
+
+    if (cfg.dim_ms != 0) {
+        uint32_t reference = (current == State::ACTIVE)
+            ? (last_stroke_ms > last_activity_ms ? last_stroke_ms : last_activity_ms)
+            : last_activity_ms;
+        uint32_t idle = now_ms - reference;
+        pct = (idle >= cfg.dim_ms) ? dim_pct : baseline_pct;
+    }
+
+    // CRITICAL: Only talk to the hardware if the brightness value has mutated!
+    if (pct != last_applied_pct) {
+        ui::set_backlight(pct);
+        last_applied_pct = pct; // Keep track of the new state
+    }
+}
 #ifndef UNIT_TEST
 [[noreturn]] void enter_deep_sleep() {
     // Blank the display cleanly through the M5Unified wrapper

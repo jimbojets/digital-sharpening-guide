@@ -18,10 +18,11 @@ namespace {
     constexpr uint16_t COL_BLACK = 0x0000;
     constexpr uint16_t COL_WHITE = 0xFFFF;
 
+    // Allocate a full-screen canvas in RAM (Uses ~64 KB of S3 memory)
+    static M5Canvas canvas(&M5.Display);
+
     ui::ActiveView s_last{};
     bool           s_last_valid = false;
-    char           s_last_angle[12] = "";
-    bool           s_last_angle_valid = false;
 
     // Throttle ZERO_CAL countdown to ~10 Hz (only repaint when tenths digit or
     // the moving-state changes).
@@ -41,24 +42,25 @@ namespace {
     // Default GLCD font advances 6 px/char wide, 8 px tall, scaled by text size.
     int text_w(const char* s, int size) { return (int)std::strlen(s) * 6 * size; }
 
+    // DRAWING HELPERS: All re-routed to draw onto 'canvas' instead of 'M5.Display'
     void draw_centered(const char* s, int y, int size, uint16_t fg, uint16_t bg) {
-        M5.Display.setTextColor(fg, bg);
-        M5.Display.setTextSize(size);
+        canvas.setTextColor(fg, bg);
+        canvas.setTextSize(size);
         int x = (SCR_W - text_w(s, size)) / 2;
         if (x < 0) x = 0;
-        M5.Display.setCursor(x, y);
-        M5.Display.print(s);
+        canvas.setCursor(x, y);
+        canvas.print(s);
     }
 
     // Center a string horizontally within the column [x0, x0 + region_w).
     void draw_centered_in(const char* s, int x0, int region_w, int y, int size,
                           uint16_t fg, uint16_t bg) {
-        M5.Display.setTextColor(fg, bg);
-        M5.Display.setTextSize(size);
+        canvas.setTextColor(fg, bg);
+        canvas.setTextSize(size);
         int x = x0 + (region_w - text_w(s, size)) / 2;
         if (x < x0) x = x0;
-        M5.Display.setCursor(x, y);
-        M5.Display.print(s);
+        canvas.setCursor(x, y);
+        canvas.print(s);
     }
 }
 
@@ -72,21 +74,29 @@ void begin() {
     // This locks text_w calculation offsets to perfectly match the S3 panel.
     M5.Display.setFont(&fonts::Font0);
     
+    // Initialize our frame buffer sprite dimensions
+    canvas.createSprite(SCR_W, SCR_H);
+    
     clear();
 }
 
 void clear() {
-    M5.Display.fillScreen(COL_BLACK);
+    // Clear the off-screen frame buffer, NOT the hardware panel
+    canvas.fillScreen(COL_BLACK);
     s_last_valid = false;
-    s_last_angle_valid = false;
     s_last_zc_tenths_valid = false;
 }
+
+// ==========================================
+// PART 1: MAIN MENUS & INITIALIZATION
+// ==========================================
 
 void draw_boot() {
     clear();
     draw_centered("SHARPENING", 38, 2, COL_WHITE, COL_BLACK);
     draw_centered("GUIDE",      64, 2, COL_WHITE, COL_BLACK);
     draw_centered("v0.1.0",     100, 1, COL_WHITE, COL_BLACK);
+    canvas.pushSprite(0, 0); // Render frame to hardware display instantly
 }
 
 void draw_set_target(float live_angle_deg, bool in_preset_mode, PresetSelection preset) {
@@ -102,6 +112,7 @@ void draw_set_target(float live_angle_deg, bool in_preset_mode, PresetSelection 
     }
     draw_centered(in_preset_mode ? "A:Pick   B:Next" : "A:Confirm   B:Presets",
                   118, 1, COL_WHITE, COL_BLACK);
+    canvas.pushSprite(0, 0);
 }
 
 void draw_set_tolerance(Tolerance tol) {
@@ -115,11 +126,14 @@ void draw_set_tolerance(Tolerance tol) {
     }
     draw_centered(label, 52, 3, COL_WHITE, COL_BLACK);
     draw_centered("A:Confirm   B:Change", 118, 1, COL_WHITE, COL_BLACK);
+    canvas.pushSprite(0, 0);
 }
 
+// ==========================================
+// PART 2: ACTIVE HUD VIEW & METRIC RENDERING
+// ==========================================
+
 void draw_active(const ActiveView& v) {
-    // Two equal columns: ANGLE (left) | STROKE (right). Both rendered at the same
-    // large text size so neither reads as secondary.
     constexpr int DIV_X   = 120;          // column divider / right-column origin
     constexpr int LABEL_Y = 24;           // small column headers
     constexpr int NUM_Y   = 52;           // big numbers (size 5 -> 40 px tall)
@@ -127,70 +141,51 @@ void draw_active(const ActiveView& v) {
     constexpr int NUM_SZ  = 5;
     const uint16_t bg = color_for(v.color);
 
-    bool color_changed = !s_last_valid || s_last.color != v.color;
-    if (color_changed) {
-        M5.Display.fillScreen(bg);
-        // Legend strip across the top.
-        M5.Display.fillRect(8,   4, 12, 12, COL_BLUE);
-        M5.Display.fillRect(78,  4, 12, 12, COL_GREEN);
-        M5.Display.fillRect(146, 4, 12, 12, COL_RED);
-        M5.Display.setTextColor(COL_WHITE);
-        M5.Display.setTextSize(1);
-        M5.Display.setCursor(24,  6); M5.Display.print("LOW");
-        M5.Display.setCursor(94,  6); M5.Display.print("OK");
-        M5.Display.setCursor(162, 6); M5.Display.print("HIGH");
-        // Column divider + static headers.
-        M5.Display.fillRect(DIV_X - 1, 22, 2, SCR_H - 22, COL_WHITE);
-        draw_centered_in("ANGLE",  0,     DIV_X,         LABEL_Y, 2, COL_WHITE, bg);
-        draw_centered_in("STROKE", DIV_X, SCR_W - DIV_X, LABEL_Y, 2, COL_WHITE, bg);
-    }
+    // Dynamic Full Screen Canvas redraw is now perfectly safe and stutter-free
+    canvas.fillScreen(bg);
 
-    bool counts_changed =
-        s_last.current_side != v.current_side ||
-        s_last.strokes_A != v.strokes_A ||
-        s_last.strokes_B != v.strokes_B;
-    // The buzzer overlay sits over the lower band; when it clears (or a color
-    // change wiped the screen) we must repaint the numbers it covered.
-    bool flash_ended = s_last_valid && s_last.buzzer_flash && !v.buzzer_flash;
+    // Legend strip across the top
+    canvas.fillRect(8,   4, 12, 12, COL_BLUE);
+    canvas.fillRect(78,  4, 12, 12, COL_GREEN);
+    canvas.fillRect(146, 4, 12, 12, COL_RED);
+    canvas.setTextColor(COL_WHITE);
+    canvas.setTextSize(1);
+    canvas.setCursor(24,  6); canvas.print("LOW");
+    canvas.setCursor(94,  6); canvas.print("OK");
+    canvas.setCursor(162, 6); canvas.print("HIGH");
 
-    // Right column: current-side stroke count (big) + other-side count (small).
-    if (color_changed || counts_changed || flash_ended) {
-        uint32_t big = (v.current_side == Side::A) ? v.strokes_A : v.strokes_B;
-        uint32_t sm  = (v.current_side == Side::A) ? v.strokes_B : v.strokes_A;
-        char other_label = (v.current_side == Side::A) ? 'B' : 'A';
-        char buf[12];
-        std::snprintf(buf, sizeof buf, "%u", (unsigned)big);
-        M5.Display.fillRect(DIV_X + 1, NUM_Y, SCR_W - DIV_X - 1, 8 * NUM_SZ, bg);
-        draw_centered_in(buf, DIV_X, SCR_W - DIV_X, NUM_Y, NUM_SZ, COL_WHITE, bg);
-        char sbuf[16];
-        std::snprintf(sbuf, sizeof sbuf, "%c:%u", other_label, (unsigned)sm);
-        M5.Display.fillRect(DIV_X + 1, SUB_Y, SCR_W - DIV_X - 1, 16, bg);
-        draw_centered_in(sbuf, DIV_X, SCR_W - DIV_X, SUB_Y, 2, COL_WHITE, bg);
-    }
+    // Column divider + static headers
+    canvas.fillRect(DIV_X - 1, 22, 2, SCR_H - 22, COL_WHITE);
+    draw_centered_in("ANGLE",  0,     DIV_X,         LABEL_Y, 2, COL_WHITE, bg);
+    draw_centered_in("STROKE", DIV_X, SCR_W - DIV_X, LABEL_Y, 2, COL_WHITE, bg);
 
-    // Left column: live angle as a whole number. Rounding to an integer also
-    // means we only repaint when the displayed degree actually changes, so the
-    // value no longer flickers on sub-degree jitter.
+    // Right column: stroke parsing
+    uint32_t big = (v.current_side == Side::A) ? v.strokes_A : v.strokes_B;
+    uint32_t sm  = (v.current_side == Side::A) ? v.strokes_B : v.strokes_A;
+    char other_label = (v.current_side == Side::A) ? 'B' : 'A';
+    
+    char buf[12];
+    std::snprintf(buf, sizeof buf, "%u", (unsigned)big);
+    draw_centered_in(buf, DIV_X, SCR_W - DIV_X, NUM_Y, NUM_SZ, COL_WHITE, bg);
+    
+    char sbuf[16];
+    std::snprintf(sbuf, sizeof sbuf, "%c:%u", other_label, (unsigned)sm);
+    draw_centered_in(sbuf, DIV_X, SCR_W - DIV_X, SUB_Y, 2, COL_WHITE, bg);
+
+    // Left column: live rounded angle integer
     char abuf[12];
     std::snprintf(abuf, sizeof abuf, "%ld", std::lround(v.angle_deg));
-    if (color_changed || flash_ended
-        || !s_last_angle_valid || std::strcmp(abuf, s_last_angle) != 0) {
-        M5.Display.fillRect(0, NUM_Y, DIV_X - 1, 8 * NUM_SZ, bg);
-        draw_centered_in(abuf, 0, DIV_X, NUM_Y, NUM_SZ, COL_WHITE, bg);
-        std::strncpy(s_last_angle, abuf, sizeof s_last_angle - 1);
-        s_last_angle[sizeof s_last_angle - 1] = '\0';
-        s_last_angle_valid = true;
-    }
+    draw_centered_in(abuf, 0, DIV_X, NUM_Y, NUM_SZ, COL_WHITE, bg);
 
-    // Draw the buzzer-flash overlay only when it newly appears or the area under
-    // it was just repainted (color change wiped the screen; a counts repaint
-    // covers the right-column sub-label band the overlay overlaps).
-    if (v.buzzer_flash && (!s_last_valid || !s_last.buzzer_flash
-                           || color_changed || counts_changed)) {
-        M5.Display.fillRect(30, 96, 180, 30, COL_BLACK);
+    // Draw the buzzer-flash overlay directly over the lower layout block in RAM
+    if (v.buzzer_flash) {
+        canvas.fillRect(30, 96, 180, 30, COL_BLACK);
         const char* msg = v.buzzer_flash_on ? "BUZZER ON" : "BUZZER OFF";
         draw_centered(msg, 102, 2, COL_WHITE, COL_BLACK);
     }
+
+    // Single blit architecture completely removes dynamic frame calculations from your view
+    canvas.pushSprite(0, 0);
 
     s_last       = v;
     s_last_valid = true;
@@ -201,16 +196,21 @@ void draw_summary(float target_deg, Tolerance tol, uint32_t a, uint32_t b, uint3
     draw_centered("SESSION", 4, 2, COL_WHITE, COL_BLACK);
     const char* t = (tol == Tolerance::TIGHT) ? "T2" : (tol == Tolerance::NORMAL) ? "N3" : "E5";
     char buf[48];
-    M5.Display.setTextColor(COL_WHITE, COL_BLACK);
-    M5.Display.setTextSize(2);
+    canvas.setTextColor(COL_WHITE, COL_BLACK);
+    canvas.setTextSize(2);
     std::snprintf(buf, sizeof buf, "Target: %d", (int)target_deg);
-    M5.Display.setCursor(12, 32);  M5.Display.print(buf);
+    canvas.setCursor(12, 32);  canvas.print(buf);
     std::snprintf(buf, sizeof buf, "Tol: %s   A:%u  B:%u", t, (unsigned)a, (unsigned)b);
-    M5.Display.setCursor(12, 56);  M5.Display.print(buf);
+    canvas.setCursor(12, 56);  canvas.print(buf);
     std::snprintf(buf, sizeof buf, "Time %02u:%02u", (unsigned)(duration_s/60), (unsigned)(duration_s%60));
-    M5.Display.setCursor(12, 80);  M5.Display.print(buf);
+    canvas.setCursor(12, 80);  canvas.print(buf);
     draw_centered("A:New   B:Sleep", 118, 1, COL_WHITE, COL_BLACK);
+    canvas.pushSprite(0, 0);
 }
+
+// ==========================================
+// PART 3: PROMPTS, DIAGNOSTICS & SYSTEM POWER
+// ==========================================
 
 void draw_fault(FaultCode code) {
     clear();
@@ -219,6 +219,7 @@ void draw_fault(FaultCode code) {
     std::snprintf(buf, sizeof buf, "E%02u", (unsigned)code);
     draw_centered(buf, 62, 3, COL_RED, COL_BLACK);
     draw_centered("Power-cycle to retry", 112, 1, COL_WHITE, COL_BLACK);
+    canvas.pushSprite(0, 0);
 }
 
 void draw_resume_prompt(float target_deg, Tolerance tol, uint32_t a, uint32_t b, int seconds_remaining) {
@@ -233,11 +234,12 @@ void draw_resume_prompt(float target_deg, Tolerance tol, uint32_t a, uint32_t b,
     std::snprintf(buf, sizeof buf, "%d", seconds_remaining);
     draw_centered(buf, 94, 2, COL_WHITE, COL_BLACK);
     draw_centered("A:Resume   B:New", 120, 1, COL_WHITE, COL_BLACK);
+    canvas.pushSprite(0, 0);
 }
 
 void draw_zero_cal_prompt(int step, bool retry) {
     s_last_zc_tenths_valid = false;
-    M5.Display.fillScreen(COL_BLACK);
+    canvas.fillScreen(COL_BLACK);
     char hdr[16];
     std::snprintf(hdr, sizeof hdr, "ZERO CAL  %d/2", step);
     draw_centered(hdr, 8, 2, COL_WHITE, COL_BLACK);
@@ -246,6 +248,7 @@ void draw_zero_cal_prompt(int step, bool retry) {
     if (retry) {
         draw_centered("HOLD STILL", 92, 3, COL_RED, COL_BLACK);
     }
+    canvas.pushSprite(0, 0);
 }
 
 void draw_zero_cal_progress(int remaining_ms, bool moving) {
@@ -255,10 +258,8 @@ void draw_zero_cal_progress(int remaining_ms, bool moving) {
     s_last_zc_tenths_valid = true;
     s_last_zc_moving       = moving;
 
-    M5.Display.fillScreen(COL_BLACK);
+    canvas.fillScreen(COL_BLACK);
     if (moving) {
-        // The capture can't progress while the device is moving — say so loudly
-        // instead of showing a frozen countdown, and offer the force-capture.
         draw_centered("KEEP STILL", 18, 3, COL_RED, COL_BLACK);
         draw_centered("set it down", 58, 1, COL_WHITE, COL_BLACK);
         draw_centered("or tap B to capture", 84, 1, COL_WHITE, COL_BLACK);
@@ -268,11 +269,10 @@ void draw_zero_cal_progress(int remaining_ms, bool moving) {
         std::snprintf(buf, sizeof buf, "%d.%ds", tenths / 10, tenths % 10);
         draw_centered(buf, 70, 4, COL_WHITE, COL_BLACK);
     }
+    canvas.pushSprite(0, 0);
 }
 
 void set_backlight(uint8_t percent) {
-    // Backlight on the S3 uses standard PWM hardware timing instead of an I2C chip registry.
-    // The same-value comparison is safely preserved to conserve clock cycles at 50 Hz.
     static uint8_t s_last_pct = 255;   // impossible sentinel (range is 0..100)
     if (percent > 100) percent = 100;
     if (percent == s_last_pct) return;
@@ -281,7 +281,6 @@ void set_backlight(uint8_t percent) {
 }
 
 } // namespace ui
-
 
 #else
 // Native stubs for tests.
